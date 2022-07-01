@@ -1,0 +1,313 @@
+---
+title: "Actividad Evaluatoria"
+date: "Febrero 2022"
+output:
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+    number_sections: yes
+    theme: united
+    highlight: breezedark
+    df_print: paged
+---
+
+```{r, echo=F, results='hide', message=FALSE, warning=FALSE}
+#cargamos las librerías que vamos a necesitar
+library(tidyverse)
+library(ggthemes)
+library(lubridate)
+library(readxl)
+library(dplyr)
+library(caret)
+library(tidytext)
+library(wordcloud)
+library(syuzhet)
+library(udpipe)
+library(topicmodels)
+```
+
+## Problema de Negocio
+Desde el equipo de CRM hemos detectado una tendencia descendente en la satisfacción de los consumidores de la marca. Es por ello que requerimos un análisis enfocado en comprender las razones de este descenso tanto a nivel general, como particular de alguno de nuestros grupos de consumidores identificados.  
+A su vez, esperamos del equipo de Customer Analytics una serie de recomendaciones para revertir la situación
+
+```{r, echo=F, message=FALSE, results='hide', warning=FALSE, fig.show='hide'}
+#Primero deben pegar aquí todo el código del script de R completado, para luego poder completar correctamente las diferentes consignas.
+
+# SEGMENTACION RFM --------------------------------------------------------
+
+## Importar data
+dataRFM <- read_csv("VCH_dataset_transacciones.csv")
+
+## Eliminar registros que no son útiles para el análisis
+dataRFM_clean <- dataRFM %>% filter(UNITS > 0 & GROSS_SALES > 0) 
+
+##Establecemos formato de fecha
+dataRFM_clean$INVOICE_YEARMONTH <- as.Date(dataRFM_clean$INVOICE_YEARMONTH)
+
+## Establecemos fecha de análisis
+fecha_analisis <-  as.Date("2022-01-01")
+
+## Cálculo del RFM 
+dataRFM_clean <- dataRFM_clean %>% 
+  group_by(CUSTOMER_FSK, INVOICE_YEARMONTH) %>%
+  summarise(UNITS = sum(UNITS),
+            GROSS_SALES = sum(GROSS_SALES))
+
+Comportamiento_Compra <- dataRFM_clean %>% 
+  group_by(CUSTOMER_FSK) %>%
+  summarise(Recency=as.numeric(fecha_analisis-max(INVOICE_YEARMONTH)),
+            Frequency=length(unique(INVOICE_YEARMONTH)), 
+            Monetary_Value= mean(GROSS_SALES)) 
+
+summary(Comportamiento_Compra[ ,2:4])
+
+## Clusterización de los consumidores
+## Definimos el seed para poder replicar el resultado
+set.seed(12345) 
+Segmentacion_RFM <- kmeans(scale(Comportamiento_Compra[,2:4]), 5, nstart = 1)
+
+Comportamiento_Compra$Cluster <- as.factor(Segmentacion_RFM$cluster)
+
+## Analizamos el resultado de la segmentación
+Comportamiento_Compra %>% 
+  select(2:5) %>%
+  group_by(Cluster) %>%
+  summarise_all(mean)
+
+#Asignamos un nombre relevante para los cluster
+Comportamiento_Compra$Segmento <- NA
+Comportamiento_Compra$Segmento[Comportamiento_Compra$Cluster == 1] <- "Churn"
+Comportamiento_Compra$Segmento[Comportamiento_Compra$Cluster == 2] <- "At Risk"
+Comportamiento_Compra$Segmento[Comportamiento_Compra$Cluster == 4] <- "Promising"
+Comportamiento_Compra$Segmento[Comportamiento_Compra$Cluster == 5] <- "Loyals"
+Comportamiento_Compra$Segmento[Comportamiento_Compra$Cluster == 3] <- "Champions"
+
+
+#SATISFACCION -----------------------------------------------------------
+
+satisfaccion <- read_excel("customer_satisfaction_VTD.xlsx") %>% 
+  filter(review_time > as.Date("2021-01-01"))
+
+# Unimos los datos de Comportamiento Compra y Satisfacción
+Analisis_Percepcion <- merge(Comportamiento_Compra %>% 
+                             rename(id=CUSTOMER_FSK),
+                             satisfaccion,
+                             by="id")
+
+# Analizaremos el nivel de satisfacción de los consumidores según segmento
+Champions <- Analisis_Percepcion %>% filter(Segmento == "Champions")
+Churn     <- Analisis_Percepcion %>% filter(Segmento == "Churn")
+AtRisk    <- Analisis_Percepcion %>% filter(Segmento == "At Risk")
+Promising <- Analisis_Percepcion %>% filter(Segmento == "Promising")
+Loyals    <- Analisis_Percepcion %>% filter(Segmento == "Loyals")
+
+## Calculo de C-SAT de los consumidores 
+CSAT_Champions <- length(which(na.omit(Champions$rating) >= 4))/length(na.omit(Champions$rating))*100
+CSAT_Loyals <- length(which(na.omit(Loyals$rating) >= 4))/length(na.omit(Loyals$rating))*100
+CSAT_AtRisk <- length(which(na.omit(AtRisk$rating) >= 4))/length(na.omit(AtRisk$rating))*100
+CSAT_Promising <- length(which(na.omit(Promising$rating) >= 4))/length(na.omit(Promising$rating))*100
+CSAT_Churn <- length(which(na.omit(Churn$rating) >= 4))/length(na.omit(Churn$rating))*100
+
+# Analizar el nivel de satisfacción de los diferentes tipos de consumidores 
+clusters_n <- c("Champions", "Loyals", "Promising", "At Risk", "Churn")
+valores_csat <- c(CSAT_Champions, CSAT_Loyals, CSAT_Promising, CSAT_AtRisk, CSAT_Churn)
+Csat_Clusters <- data.frame(clusters_n, valores_csat)
+
+
+# ANALIZAR LA PERCEPCIÓN DE LOS CONSUMIDORES ------------------------------
+
+#Una forma de análisis es entendiendo el sentimiento general de los comentarios 
+#Importamos el modelo en español
+ud_model <- udpipe_load_model(file= "spanish-gsd-ud-2.5-191206.udpipe")
+
+#Hemos visto que ningun cluster tienen un problema de satisfacción, por lo que el análisis de percepción de marca lo centraremos en todos aquellos que no han dado una buena valoración, para buscar posibles áreas de mejora.
+
+#Generamos un nuevo data frame aplicando la función "udpipe_anotate" para obtener los tags de todas las palabras
+Analisis_Percepcion2 <- udpipe_annotate(ud_model, x = Analisis_Percepcion$review, tagger = "default", parser = "none")
+Analisis_Percepcion2 <- as.data.frame(Analisis_Percepcion2)
+
+#Centramos el análisis de sentimiento solo en palabras relevantes
+sentiment_reviews <- Analisis_Percepcion2 %>%
+  filter(upos %in% c("ADJ", "VERB", "NOUN")) %>%
+  group_by(lemma) %>%
+  count(upos) %>%
+  arrange(desc(n))
+
+# Convertimos el dataframe a vector con la función unlist
+Sentiment_Consumidores <- unlist(sentiment_reviews)
+
+#Definimos que queremos obtener el sentimiento a través del método Afinn y usando el lenguaje español
+Sentiment_Afinn <- get_sentiment(char_v = Sentiment_Consumidores, method = "afinn", language = "spanish")
+
+#Agregamos el resultado del sentimiento al dataframe de palabras
+Sentiment_Consumidores_Afinn <- as.data.frame(cbind(Sentiment_Consumidores, Sentiment_Afinn))
+names(Sentiment_Consumidores_Afinn)[2] <- "sentiment_afinn"
+
+#Analizamos la distribución de las palabras positivas y negativas
+table(Sentiment_Consumidores_Afinn$sentiment_afinn)
+
+# sentiment_afinn menor o igual a cero
+Sentiment_Consumidores_Afinn_2 <- as.data.frame(Sentiment_Consumidores_Afinn)
+Sentiment_Consumidores_Afinn_2 <- filter(Sentiment_Consumidores_Afinn_2, sentiment_afinn<=0)
+sentiment_reviews_2 <- merge(sentiment_reviews,
+                           Sentiment_Consumidores_Afinn_2 %>% 
+                           rename(lemma=Sentiment_Consumidores))
+
+# sentiment_afinn menor a cero
+Sentiment_Consumidores_Afinn_3 <- filter(Sentiment_Consumidores_Afinn, sentiment_afinn<0)
+sentiment_reviews_3 <- inner_join(sentiment_reviews,
+                                  Sentiment_Consumidores_Afinn_3 %>% 
+                                    rename(lemma=Sentiment_Consumidores))
+
+# IDENTIFICAR TÓPICOS EN LAS VALORACIONES DE LOS USUARIOS -----------------
+
+# Definimos una columna con un key para identificar cada término según la valoración a la que pertenece
+Analisis_Percepcion2$topic_level_id <- unique_identifier(Analisis_Percepcion2, fields = c("doc_id", "paragraph_id", "sentence_id"))
+
+Analisis_Percepcion3 <- Analisis_Percepcion2 %>%
+  filter(upos %in% c("ADJ", "VERB", "NOUN"))
+
+Percepcion_DTF <- document_term_frequencies(Analisis_Percepcion3, document = "topic_level_id", term = "lemma")
+
+#creamos el document term matrix
+dtm <- document_term_matrix(x = Percepcion_DTF)
+
+#Definimos el seed y 3 tópicos
+Percepcion_LDA <- LDA(dtm, k = 2, control = list(seed = 1234))
+
+#Tranformar el output del LDA en un formato de objeto para inspeccionar
+Percepcion_topicos <- tidy(Percepcion_LDA, matrix = "beta")
+
+#Removemos palabras hasta que los tópicos sean identificables entre si
+dtm2 <- dtm_remove_terms(dtm, c("canción","escuchar","aplicación","música","hace","letra","tener","dar","buen","usar","hacer","gracia","vez", "reproducir","servicio","estar","seguir","desear", "poner","querer","saber","ser","excelente","gustar","buen","encantar","ver","pasar","año","mejor","playlist","anuncio","bue","hora","dejar","día","descargado","cerrar","haber","funcionar","ir","gusto","actualizar","opción","genial","vida","pagar","spotify","app", "descargar","calidad","sonido","recomer","salir","premium","artista","perfecto","tema","musico","problema")) 
+Percepcion_LDA <- LDA(dtm2, k = 3, control = list(seed = 1234))
+Percepcion_topicos <- tidy(Percepcion_LDA, matrix = "beta")
+
+```
+  
+  
+*** 
+## Metodología
+Se ha desarrollado un análisis sobre el comportamiento de compra de nuestros clientes para detectar los grupos más relevantes y luego hemos analizado en profundidad los datos más recientes sobre el nivel de satisfacción y la percepción de marca para determinar si existen segmentos específicos que se encuentran descontentos.  
+Se han analizado 10.000 transacciones del último año para comprender los actuales patrones de compra, así como las valoraciones realizadas recientemente por parte de 4.338 clientes.  
+
+*** 
+## Comportamiento de Compra
+Analizando las métricas de RFM encontramos que el comportamiento de compra de nuestros clientes se caracteriza por un bajo Recency (promedio de 154 días). Además, la frecuencia de compras por cliente durante el año 2021 ha sido baja, alcanzando una media de 2 compras realizadas. Finalmente, se puede indicar que el valor monetario promedio ha sido pequeño con un valor de 42.83 euros. Todas las métricas están alineadas  al rubro de la empresa (Spotify), la cual ofrece reproducción de música vía streaming y requiere de pagos mensuales para el servicio premium.
+
+Al analizar la gráfica, se observa que los montos de compra más elevados corresponden a clientes que pagaron como máximo 2 veces durante todo el año, mientras que los de mayor frecuencia tuvieron gastos menores. Lo cual indicaría que ciertos clientes del servicio suelen realizar pagos anuales o semestrales, mientras que la mayoría lo realiza mensual o bimestralmente.
+
+
+```{r, echo=F, message=FALSE, warning=FALSE}
+#Consigna 1: Exponer en no menos de 5 líneas los datos más relevantes del comportamiento de compra de los consumidores reflejado en las métricas de RFM y haciendo uso de los siguientes gráficos como apoyo visual:
+summary(Comportamiento_Compra[ ,2:4])
+
+ggplot(Comportamiento_Compra) +
+  geom_point(mapping = aes(x = Frequency, y = Recency, size = Monetary_Value)) +
+  ggtitle('Comportamiento de Compra basado en RFM') +
+  theme_stata()
+
+```
+
+  
+*** 
+## Distribución actual de clientes
+Desde la perspectiva del comportamiento de compra encontramos que la mayoría de clientes son Champions, es decir, realizaron recientemente una compra y compraron varias veces durante el año. El segundo grupo más grande son Promising, quienes empiezan a realizar compras en la empresa.
+Esto coincide con lo señalado previamente, siendo la mayoría usuarios que pagan el servicio premium cada mes. 
+
+Por otro lado, si bien se identifica que los clientes AtRisk son minoría (614), estos son quienes realizan gastos más elevados en comparación al respecto de segmentos. Este grupo puede ser de especial interés ya que realizar el pago anual o semestral trae como desventaja el desconocer si estarían dispuestos a realizar un siguiente pago.
+
+
+```{r, echo=F, message=FALSE, warning=FALSE}
+#Consigna 2: Etiquetar cada uno de los clusters a través de la segmentación tradicional, justificando debidamente la selección de cada uno y ejecutando el siguiente gráfico como apoyo visual de la distribución de los diferentes clusters:
+
+table(Comportamiento_Compra$Segmento)
+
+ggplot() +
+  geom_point(data = Comportamiento_Compra, 
+             mapping = aes(x = Frequency, 
+                           y = Monetary_Value, 
+                           color = Segmento))
+
+
+```
+
+  
+*** 
+## Nivel de Satisfacción
+En lo referente al nivel de satisfacción mediante el indicador CSAT, se identifica que todos los segmentos de clientes presentan porcentajes favorables (mayores al 60%). A pesar de ello, se observan índices más bajos respectoa al resto en los clientes Promising y Champions (65% y 66% respectivamente), lo cual podría explicarse debido a que este grupo de clientes son quienes realizan pagos del servicio frecuentemente y posiblemente hagan más uso del mismo, estando expuestos a mayores fallas o incovenientes.
+
+```{r, echo=F,  message=FALSE, warning=FALSE}
+#Consigna 3: Explicar el nivel de satisfacción de los diferentes tipos de consumidores y señalar evidencia de que exista o no un grupo particular que puede estar causando el descenso de la satisfacción general o no:
+Csat_Clusters
+```
+
+*** 
+## Percepción de Marca
+En términos generales, encontramos que los consumidores que han dado una baja valoración de C-SAT mencionan con mayor frecuencia términos como "anuncio", "pagar", "premium", "cerrar", "error". Al respecto podemos inferir que la baja satisfacción responde a niveles altos publicidad que aparece a los clientes al no contar con un servicio premium y que les obliga a pagar. Asimismo, otra posible causa serían los errores en los productos relacionados a música tales como cierres repentinos, pudiendo persistir entre los clientes premium.
+
+Al analizar el gráfico de nubes de palabras observamos gran predominancia de palabras neutras; por ello se realizó un segundo gráfico con solo las palabras de valencia negativa donde aparecen términos como "horrible", "propanda","fatal","error", "offline", los cuales están alineados con las interpretaciones del anterior párrafo, además de aparecer una nueva razón al aparecer una nueva razón: problemas con el servicio offline.
+
+No obstante, al analizar las valencias de las palabras, se observa que no existen términos muy negativos (-5 o -4), lo cual podría significar una oportunidad para recuperar a los clientes insatisfechos.
+
+```{r, echo=F,  message=FALSE, warning=FALSE}
+#Consigna 4: Describir el sentiment general de los usuarios que han dado una valoración de satisfacción baja/neutra, haciendo uso del wordcloud como apoyo visual:
+
+wordcloud(
+  words = sentiment_reviews_2$lemma, 
+  freq = sentiment_reviews_2$n, 
+  max.words = 100, #define cuántas palabras se incluirán en el gráfico
+  min.freq = 4, #la frecuencia mínima de cada palabra, que dependerá de la frecuencia general del dataset
+  scale =c(2.8,0.75), #define el tamaño de las diferentes palabras según presenten una alta o baja frecuencia
+  random.order = T, 
+  rot.per = 0.3, random.color = T,
+  color = brewer.pal(4, "BrBG"))
+
+
+wordcloud(
+  words = sentiment_reviews_3$lemma, 
+  freq = sentiment_reviews_3$n, 
+  max.words = 50, #define cuántas palabras se incluirán en el gráfico
+  min.freq = 2, #la frecuencia mínima de cada palabra, que dependerá de la frecuencia general del dataset
+  scale =c(2.8,0.75), #define el tamaño de las diferentes palabras según presenten una alta o baja frecuencia
+  random.order = T, 
+  rot.per = 0.3, random.color = T,
+  color = brewer.pal(4, "BrBG"))
+```
+
+
+Al analizar los tres tópicos resultantes observamos que el primero gira  alta cantidad de publicidad en usuarios que no son premium, el segundo refiere a problemas de la reproducción de música en ciertos segundos específicos y el tercero está ligado a fallas por la actualización del aplicativo. 
+
+```{r, echo=F,  message=FALSE, warning=FALSE}
+#Consigna 5: Identificar los tópicos de conversación de los usuarios con menor nivel de satisfacción, presentarlos debidamente en el informe a partir de la visualización de los datos y 
+Percepcion_topicos %>%
+  filter(beta > 0.005) %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered()
+```
+
+
+*** 
+## Recomendaciones Finales
+```{r, echo=F, results='hide', message=FALSE, warning=FALSE}
+#A forma de conclusión, lista un conjunto de recomendaciones que el equipo de CRM y Marketing deberían tomar en consideración para revertir la baja satisfacción de estos usuarios.
+```
+
+* Mejorar el servicio en el modo offline debido a que es uno de los principales razones de insatisfacción entre los clientes cuando desean escuchar sus canciones descargadas. Este punto debería ser corregido prontamente, considerando que la mayoría de usuarios suelen pagar frecuentemente el servicio y por lo tanto utilizarlo más.
+
+* Evaluar la pertinencia de la cantidad de anuncios presentados a los usarios que no son premium, puesto que si bien puede incentivarlos a pagar la suscripción también puede tener un efecto adverso, haciendo que usuarios recientes migren a otro aplicativo.
+
+* Corregir fallas al momento de la reproducción de música ya que muchos usuarios insatisfechos reportan cortes tras algunos segundos, afectando así la experiencia del usuario.
+
+* Utilizar las fortalezas del servicio como la variedad de artistas y canciones y la buena calidad de audio, junto a las mejoras ya mencionadas, para mantener a los usuarios del servicio. Si bien existen comentarios negativos, estos no son tan críticos; permitiendo así mejorar la relación con los clientes.
+
+
+
+
+

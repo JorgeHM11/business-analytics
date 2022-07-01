@@ -1,0 +1,260 @@
+---
+title: "Reporte-Segmentación RFM"
+date:  "20/01/2022"
+output: 
+  pdf_document: 
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, 
+                      fig.align = "center", 
+                      warning = FALSE, 
+                      results = 'asis')
+```
+
+\newpage
+
+# INSTRUCCIONES
+
+En esta actividad tu habilidad para realizar un análisis RFM será evaluado, así como tu criterio para responder las preguntas y presentar un análisis formal.Ante todo deben cargar las librerias que necesitarán para trabajar: readr, dplyr y caret
+
+```{r}
+# La función {library} sirve para cargar los paquetes,
+# los cuales debieron ser preiamente instalados con la función {install packages}.
+# La instalación de paquetes se realiza solo la primera vez,
+# pero se deben cargar los paquetes cada vez que se inicia el programa
+
+library(readr)
+library(dplyr)
+library(caret)
+```
+
+```{r echo=FALSE}
+library(pander)
+```
+
+
+# PASO 1
+
+Importar el archivo csv llamado "dataset_Actividad1.csv" y realizar un análisis exploratorio de la información utilizando al menos 3 funciones. 
+
+¿Qué puedes mencionar acerca del data set de trabajo? Expresa tus ideas en un mínimo de 5 líneas (1.5pts).
+
+```{r eval=FALSE}
+## Importar data
+dataRFM <- read_csv("dataset_Actividad1.csv")
+```
+
+```{r echo=FALSE}
+dataRFM <- read_csv("dataset_Actividad1.csv")
+head <- head(dataRFM)
+pandoc.table(head, caption = "Data de trabajo")
+```
+
+```{r eval=FALSE}
+## Explorar data
+View(dataRFM)
+glimpse(dataRFM)
+summary(dataRFM)
+```
+
+```{r echo=FALSE}
+pandoc.table(dim(dataRFM), caption = "Filas y columnas")
+pandoc.table(summary(dataRFM), caption = "Resumen de la data")
+```
+
+> Interpretación: El archivo está compuesto por cerca de 10000 registros (filas) y 6 variables (columnas). Estas variables brindan información acerca de: los identificadores de la empresa, consumidor y producto, fecha de la facturación (compras realizadas desde enero hasta diciembre del año 2021),unidades compradas y, finalmente, sobre el precio bruto. Adicionalmente, se puede indicar que las variables de cantidades compradas y ventas brutas presentan una alta variabilidad al contar con valores máximos y mínimos muy distantes entre sí, además que contienen datos atípicos (valores en negativo).
+
+# PASO 2
+
+Crea un nuevo data frame transformando la información original para calcular las métricas de Recency, Frenquency y Monetary Value sobre transacciones válidas y evaluando la necesidad de filtrar outliers. (1.5pts).
+
+
+```{r}
+# Hay valores negativos en las variables de precio bruto y unidades, # por lo que será necesario eliminar dichos registros.
+
+# Eliminamos aquellos registros (filas) que no son útiles para nuestros análisis
+dataRFM_clean <- dataRFM %>% 
+  filter(QUANTITY_PIECES > 0 & GROSS_SALES > 0)
+```
+
+```{r eval=FALSE}
+# Verificamos que ya no existan valores atípicos
+summary(dataRFM_clean)
+```
+
+
+```{r echo=FALSE}
+pandoc.table(summary(dataRFM_clean), caption = "Resumen de la data limpia")
+```
+
+```{r eval=FALSE}
+## Normalmente la información está registrada a nivel de producto, es decir, una línea de información por cada producto de una fecha de compra
+## Lo que implica que debemos entender cuántos valores únicos contienen las columnas y tener cuidado en cómo generamos la columna de Frequency
+
+length(unique(dataRFM_clean$INVOICE_YEAR_MONTH)) #12 meses
+length(unique(dataRFM_clean$CUSTOMER_CD_FSK))    #107 consumidores
+length(unique(dataRFM_clean$PRODUCT_CD_FSK))     #2714 productos 
+```
+
+```{r}
+##Establecemos formato de fecha
+dataRFM_clean$INVOICE_YEAR_MONTH <- as.Date(dataRFM_clean$INVOICE_YEAR_MONTH, "%Y-%m-%d")
+
+# Verificamos que se cambió formato de fecha (Date)
+class(dataRFM_clean$INVOICE_YEAR_MONTH) 
+```
+
+
+# PASO 3
+
+Desarrolla un nuevo análisis exploratorio y explica los principales highlights acerca de las métricas de RFM de todos los clientes en más de 5 líneas (2pts).
+
+```{r}
+# Aplicamos fórmulas de RFM 
+
+# Cálculo de la fecha de análisis (1 día después de la última compra)
+max(dataRFM$INVOICE_YEAR_MONTH) #última compra
+fecha_analisis = as.Date("2021-12-02")
+```
+
+```{r}
+## Cálculo del RFM 
+## considerando Monetary como la suma de dinero gastado durante el periodo
+Metricas_RFM <- dataRFM_clean %>% 
+  group_by(CUSTOMER_CD_FSK) %>% 
+  summarise(Recency=as.numeric(fecha_analisis-max(INVOICE_YEAR_MONTH)),
+            Frequency=length(unique(INVOICE_YEAR_MONTH)), 
+            Monetary_Value=sum(GROSS_SALES))  
+```
+
+```{r}
+# Eliminamos el objeto creado puesto que vamos a considerar Monetary 
+# como la suma de dinero gastado durante el periodo
+remove(Metricas_RFM)
+```
+
+
+```{r}
+## Cálculo del RFM 
+## considerando Monetary como el promedio de dinero gastado durante el periodo
+
+## Para calcular el ticket promedio, 
+## debemos primero agrupar por consumidor y por fecha de compra,
+## sumando todas las unidades vendidas y el gross sales
+
+dataRFM_clean <- dataRFM_clean %>% 
+  group_by(CUSTOMER_CD_FSK, INVOICE_YEAR_MONTH) %>%
+  summarise(QUANTITY_PIECES = sum(QUANTITY_PIECES),
+            GROSS_SALES     = sum(GROSS_SALES))
+
+## para luego calcular correctamente el promedio de dinero gastado
+Metricas_RFM <- dataRFM_clean %>% 
+  group_by(CUSTOMER_CD_FSK) %>%
+  summarise(Recency=as.numeric(fecha_analisis-max(INVOICE_YEAR_MONTH)),
+            Frequency=length(unique(INVOICE_YEAR_MONTH)), 
+            Monetary_Value= mean(GROSS_SALES)) 
+```
+
+```{r eval=FALSE}
+# Realizamos un resumen de las métricas 
+summary(Metricas_RFM)
+```
+
+
+```{r echo=FALSE}
+pandoc.table(summary(Metricas_RFM), caption = "Resumen de las métricas")
+```
+
+
+> Interpretación: Los clientes evaluados presentan una media de 88 Recency, lo cual significa que en promedio no han realizado compras desde hace casi 3 meses. Además, la frecuencia de compras por cliente durante el año 2021 ha sido  relativamente baja, alcanzado una media de 6 productos comprados. Finalmente, se puede indicar que el valor monetario promedio ha sido medianamente alto con un valor de 10867 euros. 
+> Adicionalmente, se puede señalar que son productos con poca rotación, pero con bastante inversión en promedio de compra. Considerando que el valor mínimo de compra es 77 euros y el máximo es 113615 aproximadamente, lo más recomendable es incentivar el valor promedio de compra de los clientes 
+
+
+
+
+
+# PASO 4
+
+Aplique el algoritmo de k-means para definir una segmentación basada en RFM. Use 5 clusters para realizar una segmentación tradicional (1.5pts).
+
+
+```{r}
+#Definimos el seed para asegurarnos de poder replicar el resultado
+set.seed(1234) 
+
+# Le indicamoos al algoritmo que queremos obtener 5 clusters
+# utilizando solo las columnas de datos que contienen las métricas de RFM
+RFM_Segmentation <- kmeans(scale(Metricas_RFM[,2:4]), 5, nstart = 1) 
+
+#Incorporamos el resultado al dataset
+Metricas_RFM$Cluster <- as.factor(RFM_Segmentation$cluster)
+
+#Analizamos la distribución de los consumidores
+table(Metricas_RFM$Cluster)
+```
+
+```{r echo=FALSE}
+pandoc.table(table(Metricas_RFM$Cluster), caption = "Distribución de los consumidores")
+```
+
+
+# PASO 5
+
+Analice el resultado de la segmentación y las medias de las métricas para asignar el label correcto a cada cluster: identifica a los Champions, Loyals, Promising, At risk y Churn.
+
+¿Por qué consideras que los Champions están incluidos en el cluster que has seleccionado como Champions? (3.5pts).
+
+```{r eval=FALSE}
+## Primero necesitamos entender qué tipo de consumidores se han agrupado bajo cada cluster
+
+Metricas_RFM %>% 
+  select(2:5) %>%
+  group_by(Cluster) %>%
+  summarise_all(mean)
+```
+
+```{r echo=FALSE}
+m1 <- Metricas_RFM %>% 
+  select(2:5) %>%
+  group_by(Cluster) %>%
+  summarise_all(mean)
+
+pandoc.table(m1, caption = "Tipo de consumidores según cluster")
+```
+
+```{r}
+## Asignamos un nombre relevante para los equipos de marketing (PRESTAR ATENCIÓN)
+Metricas_RFM <- Metricas_RFM %>% 
+  mutate(Segmento = case_when(Cluster == 5 ~ "inactivo",
+                              Cluster == 4 ~ "en riesgo",
+                              Cluster == 2 ~ "potenciales",
+                              Cluster == 1 ~ "leales",
+                              Cluster == 3 ~ "champions",
+                              TRUE ~ "NA"))
+```
+
+
+```{r eval=FALSE}
+## Generamos un nuevo análisis de mas medias de cada métrica de RFM
+## pero sobre la columna de etiqueta del cluster (segmento)
+Metricas_RFM %>% 
+  select(2,3,4,6) %>%
+  group_by(Segmento) %>%
+  summarise_all(mean)
+```
+
+
+```{r echo=FALSE}
+m2 <- Metricas_RFM %>% 
+  select(2,3,4,6) %>%
+  group_by(Segmento) %>%
+  summarise_all(mean)
+
+pandoc.table(m2, caption = "Tipo de consumidores según segmento")
+```
+
+
+> Interpretación: Los clientes pertenecientes al cluster "3" presentan un bajo valor en **Recency** lo cual significa que realizaron recientemente una compra; además presentan un alto valor de **Frecuency** lo cual indica que  realizaron varias compras durante el periodo de análisis (año 2021). Por ello, según el esquema Recency-Frecuency se ubicarían dentro de la categoría **"Champions"**. Además, el valor promedio de compra de estos consumidores es bastante alto con un valor 11406 euros aproximademente. Por lo que se identifica a este segmento como uno de los más rentables.
+
