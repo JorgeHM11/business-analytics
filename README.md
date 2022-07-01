@@ -1,2 +1,2 @@
-# business-analytics
+# Business analytics
 Set of analysis about customer experience 
